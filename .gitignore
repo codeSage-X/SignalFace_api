@@ -1,0 +1,95 @@
+# ---- Dependencies ----
+node_modules/
+.pnp
+.pnp.*
+.yarn/*
+!.yarn/patches
+!.yarn/plugins
+!.yarn/releases
+!.yarn/versions
+
+# ---- Environment / secrets ----
+.env
+.env.*
+!.env.example
+!.env.*.example
+*.pem
+*.key
+serviceAccountKey.json
+firebase-adminsdk*.json
+google-services.json
+GoogleService-Info.plist
+
+# ---- Build output ----
+dist/
+build/
+out/
+.next/
+.turbo/
+.vercel/
+.output/
+*.tsbuildinfo
+next-env.d.ts
+
+# ---- Prisma ----
+packages/db/prisma/*.db
+packages/db/prisma/*.db-journal
+packages/db/prisma/migrations/dev.db*
+
+# ---- Expo / React Native (apps/mobile) ----
+.expo/
+.expo-shared/
+android/
+ios/
+*.jks
+*.p8
+*.p12
+*.mobileprovision
+*.orig.*
+web-build/
+expo-env.d.ts
+
+# ---- Testing / coverage ----
+coverage/
+*.lcov
+.nyc_output/
+
+# ---- Logs ----
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+pnpm-debug.log*
+lerna-debug.log*
+
+# ---- Caches ----
+.cache/
+.eslintcache
+.parcel-cache/
+.npm/
+.temp/
+tmp/
+
+# ---- Editors / OS ----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+.idea/
+*.swp
+*.swo
+.vscode/*
+!.vscode/settings.json
+!.vscode/extensions.json
+
+# ---- v0 sandbox internals ----
+__v0_runtime_loader.js
+__v0_devtools.tsx
+__v0_jsx-dev-runtime.ts
+.snowflake/
+.v0-trash/

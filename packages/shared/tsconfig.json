@@ -1,0 +1,10 @@
+{
+  "extends": "@signal-face/config/tsconfig/base",
+  "compilerOptions": {
+    "module": "commonjs",
+    "outDir": "./dist",
+    "rootDir": "."
+  },
+  "include": ["schemas/**/*", "types/**/*", "constants/**/*", "index.ts"],
+  "exclude": ["node_modules", "dist"]
+}

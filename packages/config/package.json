@@ -1,0 +1,9 @@
+{
+  "name": "@signal-face/config",
+  "version": "0.0.1",
+  "private": true,
+  "exports": {
+    "./tsconfig/*": "./tsconfig/*.json",
+    "./eslint/*": "./eslint/*.js"
+  }
+}

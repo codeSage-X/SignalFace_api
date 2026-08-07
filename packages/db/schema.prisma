@@ -1,0 +1,421 @@
+// packages/db/schema.prisma
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+// ──────────────────────────────────────────────
+// USERS & AUTH
+// ──────────────────────────────────────────────
+
+enum Role {
+  FAN
+  CREATOR
+  ADMIN
+}
+
+enum CreatorStatus {
+  NONE
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+model User {
+  id            String        @id @default(cuid())
+  email         String        @unique
+  // Null for accounts created through an OAuth provider — they have no password to compare.
+  passwordHash  String?
+  emailVerified Boolean       @default(false)
+
+  // Firebase Auth UID. Stable per account, so it survives the user changing their email.
+  firebaseUid   String?       @unique
+  // Which Firebase provider minted this account: "google.com", etc. Null for email/password signups.
+  authProvider  String?
+
+  firstName     String
+  lastName      String
+  username      String        @unique
+  displayName   String
+  // Not collected during Google sign-in; the user fills these in from Settings.
+  dateOfBirth   DateTime?
+  gender        String?
+  bio           String?
+  avatarUrl     String?
+  websiteUrl    String?
+  role          Role          @default(FAN)
+  creatorStatus CreatorStatus @default(NONE)
+
+  // Decimal, NOT Float — never represent money-like values in floating point
+  pointsBalance Decimal       @default(10000) @db.Decimal(18, 4)
+
+  referralCode  String        @unique @default(cuid())
+  referredById  String?
+  referredBy    User?         @relation("Referrals", fields: [referredById], references: [id])
+  referrals     User[]        @relation("Referrals")
+
+  signal        Signal?
+  holdings      Holding[]
+  trades        Trade[]
+  transactions  Transaction[]
+  posts         Post[]
+  comments      Comment[]
+  likes         Like[]
+  bookmarks     Bookmark[]
+  follows       Follow[]      @relation("Follower")
+  followers     Follow[]      @relation("Following")
+  // The creator page this user owns, if they have become a creator. One per
+  // user — the Realm *is* their creator profile, so it is 1:1 rather than
+  // many-per-user like a Facebook Page.
+  realm         Realm?        @relation("RealmOwner")
+  realmMembers  RealmMember[]
+  refreshTokens RefreshToken[]
+  authTokens    AuthToken[]
+
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([referredById])
+  @@index([username])
+}
+
+model RefreshToken {
+  id        String    @id @default(cuid())
+  userId    String
+  user      User      @relation(fields: [userId], references: [id], onDelete: Cascade)
+  tokenHash String    @unique
+  expiresAt DateTime
+  revokedAt DateTime?
+  createdAt DateTime  @default(now())
+
+  @@index([userId])
+}
+
+enum AuthTokenType {
+  EMAIL_VERIFY
+  PASSWORD_RESET
+}
+
+model AuthToken {
+  id        String        @id @default(cuid())
+  userId    String
+  user      User          @relation(fields: [userId], references: [id], onDelete: Cascade)
+  type      AuthTokenType
+  tokenHash String        @unique
+  attempts  Int           @default(0)
+  expiresAt DateTime
+  usedAt    DateTime?
+  createdAt DateTime      @default(now())
+
+  @@index([userId, type])
+}
+
+// ──────────────────────────────────────────────
+// SIGNALS & SCORING
+// ──────────────────────────────────────────────
+
+model Signal {
+  id           String          @id @default(cuid())
+  creatorId    String          @unique
+  creator      User            @relation(fields: [creatorId], references: [id], onDelete: Cascade)
+
+  // Display name for the Signal itself, distinct from the creator's displayName
+  // (e.g. an admin-created Signal can be titled independently of the user it's tied to).
+  title        String?
+
+  score        Decimal         @default(0) @db.Decimal(18, 4)
+  price        Decimal         @default(0) @db.Decimal(18, 4)
+  prevScore    Decimal         @default(0) @db.Decimal(18, 4)
+  growthPct    Decimal         @default(0) @db.Decimal(9, 4)
+
+  holdings     Holding[]
+  trades       Trade[]
+  scoreHistory ScoreSnapshot[]
+
+  lastScoredAt DateTime?
+  createdAt    DateTime        @default(now())
+  updatedAt    DateTime        @updatedAt
+
+  @@index([price])
+  @@index([growthPct])
+}
+
+model ScoreSnapshot {
+  id         String   @id @default(cuid())
+  signalId   String
+  signal     Signal   @relation(fields: [signalId], references: [id], onDelete: Cascade)
+  score      Decimal  @db.Decimal(18, 4)
+  price      Decimal  @db.Decimal(18, 4)
+  capturedAt DateTime @default(now())
+
+  @@index([signalId, capturedAt])
+}
+
+// ──────────────────────────────────────────────
+// TRADING, HOLDINGS, WALLET LEDGER
+// ──────────────────────────────────────────────
+
+model Holding {
+  id          String   @id @default(cuid())
+  userId      String
+  user        User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  signalId    String
+  signal      Signal   @relation(fields: [signalId], references: [id], onDelete: Cascade)
+
+  quantity    Decimal  @default(0) @db.Decimal(18, 4)
+  avgBuyPrice Decimal  @default(0) @db.Decimal(18, 4)
+
+  createdAt   DateTime @default(now())
+  updatedAt   DateTime @updatedAt
+
+  @@unique([userId, signalId])
+  @@index([signalId])
+}
+
+enum TradeSide {
+  BUY
+  SELL
+}
+
+model Trade {
+  id           String    @id @default(cuid())
+  userId       String
+  user         User      @relation(fields: [userId], references: [id])
+  signalId     String
+  signal       Signal    @relation(fields: [signalId], references: [id])
+
+  side         TradeSide
+  quantity     Decimal   @db.Decimal(18, 4)
+  pricePerUnit Decimal   @db.Decimal(18, 4)
+  totalPoints  Decimal   @db.Decimal(18, 4)
+
+  createdAt    DateTime  @default(now())
+
+  @@index([userId, createdAt])
+  @@index([signalId, createdAt])
+}
+
+enum TxnType {
+  TRADE_BUY
+  TRADE_SELL
+  SIGNUP_BONUS
+  REFERRAL_BONUS
+  ADMIN_ADJUST
+}
+
+model Transaction {
+  id           String   @id @default(cuid())
+  userId       String
+  user         User     @relation(fields: [userId], references: [id])
+  type         TxnType
+  amount       Decimal  @db.Decimal(18, 4)
+  balanceAfter Decimal  @db.Decimal(18, 4)
+  tradeId      String?
+  note         String?
+  createdAt    DateTime @default(now())
+
+  @@index([userId, createdAt])
+}
+
+// ──────────────────────────────────────────────
+// SOCIAL
+// ──────────────────────────────────────────────
+
+model Post {
+  id           String    @id @default(cuid())
+  authorId     String
+  author       User      @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  realmId      String?
+  realm        Realm?    @relation(fields: [realmId], references: [id])
+
+  body         String?
+  mediaUrls    String[]
+
+  likeCount    Int       @default(0)
+  commentCount Int       @default(0)
+  viewCount    Int       @default(0)
+  bookmarkCount Int      @default(0)
+
+  // At most 3 per author — enforced in PostsService.setPinned, not by the DB.
+  pinned       Boolean   @default(false)
+
+  comments     Comment[]
+  likes        Like[]
+  bookmarks    Bookmark[]
+
+  createdAt    DateTime  @default(now())
+  updatedAt    DateTime  @updatedAt
+
+  @@index([authorId, createdAt])
+  @@index([realmId, createdAt])
+  @@index([createdAt])
+  @@index([authorId, pinned])
+}
+
+model Bookmark {
+  id        String   @id @default(cuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  // Drives "my bookmarks", which reads newest-first for one user.
+  @@index([userId, createdAt])
+}
+
+model Comment {
+  id        String   @id @default(cuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  authorId  String
+  author    User     @relation(fields: [authorId], references: [id], onDelete: Cascade)
+  body      String
+
+  // Threading is capped at one level, TikTok-style: a reply to a reply is
+  // re-parented onto the top-level comment. Null parentId means top level.
+  parentId   String?
+  parent     Comment?  @relation("CommentReplies", fields: [parentId], references: [id], onDelete: Cascade)
+  replies    Comment[] @relation("CommentReplies")
+  replyCount Int       @default(0)
+
+  createdAt DateTime @default(now())
+
+  @@index([postId, createdAt])
+  @@index([parentId, createdAt])
+}
+
+model Like {
+  id        String   @id @default(cuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+}
+
+model Follow {
+  id          String   @id @default(cuid())
+  followerId  String
+  follower    User     @relation("Follower", fields: [followerId], references: [id], onDelete: Cascade)
+  followingId String
+  following   User     @relation("Following", fields: [followingId], references: [id], onDelete: Cascade)
+  createdAt   DateTime @default(now())
+
+  @@unique([followerId, followingId])
+  @@index([followingId])
+}
+
+// ──────────────────────────────────────────────
+// REALMS — creator pages
+// ──────────────────────────────────────────────
+//
+// A Realm is a creator's public page, in the mould of a Facebook Page or an
+// Instagram business profile: its own name, handle, avatar, cover art and
+// category, separate from the owner's personal (fan) profile. Creating one is
+// what turns a fan account into a creator account, and posts published under a
+// Realm are attributed to the page rather than to the person behind it.
+
+enum RealmStatus {
+  PENDING
+  APPROVED
+  REJECTED
+  SUSPENDED
+}
+
+enum RealmCategory {
+  MUSIC
+  MOVIE
+  COMEDY
+  SPORTS
+  FASHION
+  BEAUTY
+  GAMING
+  TECH
+  EDUCATION
+  BUSINESS
+  FOOD
+  TRAVEL
+  ART
+  FITNESS
+  CRYPTO
+  OTHER
+}
+
+model Realm {
+  id          String        @id @default(cuid())
+
+  // Unique, so a user can own at most one Realm.
+  ownerId     String        @unique
+  owner       User          @relation("RealmOwner", fields: [ownerId], references: [id], onDelete: Cascade)
+
+  name        String
+  // The page's handle, used in its public URL (/app/r/<slug>). Unique across
+  // realms; kept distinct from User.username so a creator's page handle and
+  // personal handle can differ.
+  slug        String        @unique
+  category    RealmCategory @default(OTHER)
+  tagline     String?
+  description String?
+  /// Page avatar.
+  iconUrl     String?
+  /// Page cover / backdrop art.
+  coverUrl    String?
+  websiteUrl  String?
+
+  // Creator sign-up is self-serve, so realms go live immediately; admins
+  // demote to SUSPENDED/REJECTED after the fact rather than gating up front.
+  status      RealmStatus   @default(APPROVED)
+
+  members     RealmMember[]
+  posts       Post[]
+
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  @@index([status])
+  @@index([category])
+  @@index([createdAt])
+}
+
+/// A follower of a Realm. The owner is enrolled on creation.
+model RealmMember {
+  id         String   @id @default(cuid())
+  realmId    String
+  realm      Realm    @relation(fields: [realmId], references: [id], onDelete: Cascade)
+  userId     String
+  user       User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  reputation Int      @default(0)
+  joinedAt   DateTime @default(now())
+
+  @@unique([realmId, userId])
+  @@index([userId])
+  @@index([realmId, joinedAt])
+}
+
+// ──────────────────────────────────────────────
+// PULSE ENGINE CONFIG
+// ──────────────────────────────────────────────
+
+model ScoreConfig {
+  id          String   @id @default(cuid())
+  wFollowers  Decimal  @default(0.01) @db.Decimal(9, 4)
+  wLikes      Decimal  @default(0.01) @db.Decimal(9, 4)
+  wComments   Decimal  @default(0.02) @db.Decimal(9, 4)
+  wShares     Decimal  @default(0.03) @db.Decimal(9, 4)
+  wGrowth     Decimal  @default(1.0)  @db.Decimal(9, 4)
+  priceBase   Decimal  @default(1.0)  @db.Decimal(9, 4)
+  priceK      Decimal  @default(0.1)  @db.Decimal(9, 4)
+  isActive    Boolean  @default(true)
+  updatedById String?
+  updatedAt   DateTime @updatedAt
+}
