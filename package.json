@@ -6,10 +6,14 @@
     "packages/*"
   ],
   "scripts": {
+    "packages:build": "npm run db:generate && npm run build --workspace @signal-face/db && npm run build --workspace @signal-face/shared",
+    "prebuild": "npm run packages:build",
     "build": "nest build",
+    "predev": "npm run packages:build",
     "dev": "nest start --watch",
     "start": "node dist/src/main",
     "lint": "eslint src --ext .ts",
+    "postinstall": "npm run packages:build",
     "db:generate": "npm run db:generate --workspace @signal-face/db",
     "db:migrate": "npm run db:migrate --workspace @signal-face/db",
     "db:seed": "npm run db:seed --workspace @signal-face/db"
