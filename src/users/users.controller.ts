@@ -6,6 +6,7 @@ import {
   Body,
   Req,
   Param,
+  Query,
   UseGuards,
   UseInterceptors,
   UploadedFile,
@@ -20,6 +21,7 @@ import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { UsersService } from './users.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
+import { FollowQueryDto } from './dto/follow-query.dto';
 
 // Guards are applied per-route rather than on the class, because the public
 // profile must stay readable without a token.
@@ -68,6 +70,18 @@ export class UsersController {
       throw new BadRequestException('No file uploaded');
     }
     return this.usersService.uploadAvatar(req.user.sub, file);
+  }
+
+  @Get('me/following')
+  @UseGuards(JwtAuthGuard)
+  listFollowing(@Req() req: any, @Query() query: FollowQueryDto) {
+    return this.usersService.listFollowing(req.user.sub, query);
+  }
+
+  @Get('me/followers')
+  @UseGuards(JwtAuthGuard)
+  listFollowers(@Req() req: any, @Query() query: FollowQueryDto) {
+    return this.usersService.listFollowers(req.user.sub, query);
   }
 
   // Declared after the 'me/*' routes so "me" is never read as a username.

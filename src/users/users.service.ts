@@ -8,6 +8,7 @@ import { PrismaService } from '../prisma/prisma.service';
 import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
+import { FollowQueryDto } from './dto/follow-query.dto';
 import type { User, Signal } from '@signal-face/db';
 
 type UserWithRelations = User & {
@@ -124,6 +125,80 @@ export class UsersService {
     });
 
     return { username: username.toLowerCase(), following: !existing, followersCount };
+  }
+
+  /**
+   * Accounts the viewer follows. Paginated on the `Follow` row id rather than the
+   * user id, because the cursor has to walk the join table the ordering comes from.
+   */
+  async listFollowing(viewerId: string, query: FollowQueryDto) {
+    return this.listFollowEdges(viewerId, 'following', query);
+  }
+
+  /** Accounts following the viewer. */
+  async listFollowers(viewerId: string, query: FollowQueryDto) {
+    return this.listFollowEdges(viewerId, 'followers', query);
+  }
+
+  private async listFollowEdges(
+    viewerId: string,
+    direction: 'following' | 'followers',
+    query: FollowQueryDto,
+  ) {
+    const take = query.limit ?? 20;
+
+    const rows = await this.prisma.follow.findMany({
+      where:
+        direction === 'following' ? { followerId: viewerId } : { followingId: viewerId },
+      take: take + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      orderBy: [{ createdAt: 'desc' }, { id: 'desc' }],
+      include: {
+        [direction === 'following' ? 'following' : 'follower']: {
+          select: {
+            id: true,
+            username: true,
+            displayName: true,
+            avatarUrl: true,
+            creatorStatus: true,
+            _count: { select: { followers: true } },
+          },
+        },
+      },
+    });
+
+    const hasMore = rows.length > take;
+    const page = hasMore ? rows.slice(0, take) : rows;
+    const people = page.map((row: any) =>
+      direction === 'following' ? row.following : row.follower,
+    );
+
+    // Whether the viewer follows each of these accounts back. Always true in the
+    // `following` direction; for followers it takes one extra lookup rather than
+    // a query per row.
+    let followedBack: Set<string>;
+    if (direction === 'following') {
+      followedBack = new Set(people.map((p) => p.id));
+    } else {
+      const edges = await this.prisma.follow.findMany({
+        where: { followerId: viewerId, followingId: { in: people.map((p) => p.id) } },
+        select: { followingId: true },
+      });
+      followedBack = new Set(edges.map((e) => e.followingId));
+    }
+
+    return {
+      items: people.map((person) => ({
+        id: person.id,
+        username: person.username,
+        displayName: person.displayName,
+        avatarUrl: person.avatarUrl,
+        creatorStatus: person.creatorStatus,
+        followersCount: person._count.followers,
+        isFollowedByMe: followedBack.has(person.id),
+      })),
+      nextCursor: hasMore ? page[page.length - 1].id : null,
+    };
   }
 
   async updateProfile(userId: string, dto: UpdateProfileDto) {
