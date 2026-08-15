@@ -52,6 +52,18 @@ model User {
   role          Role          @default(FAN)
   creatorStatus CreatorStatus @default(NONE)
 
+  // Topics this person wants to see, chosen at sign-up and editable later.
+  // Drives feed ranking; empty means "no preference", which reads as plain
+  // reverse-chronological.
+  interests     RealmCategory[] @default([])
+
+  // Moderation state, separate from creatorStatus: that one describes a creator
+  // application, this one describes whether the account may be used at all.
+  accountStatus AccountStatus @default(ACTIVE)
+  // Why an admin restricted or blocked them, shown back to the user.
+  statusReason  String?
+  statusAt      DateTime?
+
   // Decimal, NOT Float — never represent money-like values in floating point
   pointsBalance Decimal       @default(10000) @db.Decimal(18, 4)
 
@@ -68,6 +80,8 @@ model User {
   comments      Comment[]
   likes         Like[]
   bookmarks     Bookmark[]
+  reposts       Repost[]
+  rewardClaims  RewardClaim[]
   follows       Follow[]      @relation("Follower")
   followers     Follow[]      @relation("Following")
   // The creator page this user owns, if they have become a creator. One per
@@ -97,9 +111,20 @@ model RefreshToken {
   @@index([userId])
 }
 
+// Whether an account may be used.
+//
+// RESTRICTED is "under review": they can still sign in and read, but cannot
+// publish or interact. BLOCKED is a ban — sign-in is refused outright.
+enum AccountStatus {
+  ACTIVE
+  RESTRICTED
+  BLOCKED
+}
+
 enum AuthTokenType {
   EMAIL_VERIFY
   PASSWORD_RESET
+  REFRESH
 }
 
 model AuthToken {
@@ -207,6 +232,65 @@ enum TxnType {
   SIGNUP_BONUS
   REFERRAL_BONUS
   ADMIN_ADJUST
+  REWARD_CLAIM
+}
+
+// How a reward is earned. The first two are credited by the system; the rest
+// are claimed by the user.
+enum RewardType {
+  // Paid automatically when an account verifies its email.
+  SIGNUP_BONUS
+  // Paid to the referrer when someone they invited verifies.
+  REFERRAL_BONUS
+  // Claimable once, ever.
+  ONE_TIME
+  // Claimable again once `cooldownHours` has passed.
+  RECURRING
+}
+
+// An admin-defined reward. Editing the row changes the offer for everyone, which
+// is how the signup and referral bonuses stay adjustable without a deploy.
+model Reward {
+  id            String        @id @default(cuid())
+  name          String
+  description   String?
+  type          RewardType
+  amount        Decimal       @db.Decimal(18, 4)
+  // Off means it neither appears nor pays out, without losing its history.
+  active        Boolean       @default(true)
+
+  // Optional window. Null on either side means "no bound in that direction".
+  startsAt      DateTime?
+  endsAt        DateTime?
+
+  // RECURRING only: how long before the same user may claim again.
+  cooldownHours Int?
+  // Caps. Null means unlimited.
+  maxClaims     Int?
+  maxPerUser    Int?
+
+  claims        RewardClaim[]
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  @@index([active, type])
+}
+
+// One payout. Also the ledger the claim rules are enforced against.
+model RewardClaim {
+  id        String   @id @default(cuid())
+  rewardId  String
+  reward    Reward   @relation(fields: [rewardId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  // Recorded per claim: editing a reward's amount later must not rewrite history.
+  amount    Decimal  @db.Decimal(18, 4)
+  // Set when the claim was triggered by someone else's signup.
+  referredUserId String?
+  createdAt DateTime @default(now())
+
+  @@index([userId, createdAt])
+  @@index([rewardId, userId])
 }
 
 model Transaction {
@@ -237,10 +321,23 @@ model Post {
   body         String?
   mediaUrls    String[]
 
+  // What this post is about, resolved when it is created: the realm it was
+  // published under, else the author's own realm category. Denormalised rather
+  // than joined because the feed ranks on it for every row it considers.
+  category     RealmCategory?
+
+  // How the author framed the post: 'ORIGINAL' | '1:1' | '4:5' | '16:9' | '9:16'.
+  // Images are cropped for real before upload, so this is mainly for video —
+  // a browser can't re-encode one, so the chosen frame is applied on display.
+  aspectRatio  String?
+  // Author-chosen video cover frame. Null means "use the first frame".
+  coverUrl     String?
+
   likeCount    Int       @default(0)
   commentCount Int       @default(0)
   viewCount    Int       @default(0)
   bookmarkCount Int      @default(0)
+  repostCount  Int       @default(0)
 
   // At most 3 per author — enforced in PostsService.setPinned, not by the DB.
   pinned       Boolean   @default(false)
@@ -248,6 +345,7 @@ model Post {
   comments     Comment[]
   likes        Like[]
   bookmarks    Bookmark[]
+  reposts      Repost[]
 
   createdAt    DateTime  @default(now())
   updatedAt    DateTime  @updatedAt
@@ -256,6 +354,8 @@ model Post {
   @@index([realmId, createdAt])
   @@index([createdAt])
   @@index([authorId, pinned])
+  // The personalised feed scans by topic and recency together.
+  @@index([category, createdAt])
 }
 
 model Bookmark {
@@ -268,6 +368,21 @@ model Bookmark {
 
   @@unique([postId, userId])
   // Drives "my bookmarks", which reads newest-first for one user.
+  @@index([userId, createdAt])
+}
+
+// A post the user pushed onto their own profile. Mirrors Bookmark — the pair is
+// unique, so reposting is a toggle rather than something you can stack up.
+model Repost {
+  id        String   @id @default(cuid())
+  postId    String
+  post      Post     @relation(fields: [postId], references: [id], onDelete: Cascade)
+  userId    String
+  user      User     @relation(fields: [userId], references: [id], onDelete: Cascade)
+  createdAt DateTime @default(now())
+
+  @@unique([postId, userId])
+  // Drives "my reposts", which reads newest-first for one user.
   @@index([userId, createdAt])
 }
 

@@ -7,7 +7,9 @@ import {
   Matches,
   IsDateString,
   IsIn,
+  IsOptional,
 } from 'class-validator';
+import { Transform } from 'class-transformer';
 
 export class RegisterDto {
   @IsString()
@@ -18,10 +20,14 @@ export class RegisterDto {
   @IsNotEmpty({ message: 'Last name is required' })
   lastName: string;
 
+  // Normalised here, before validation, so the value the rest of the request
+  // sees is already the one that will be stored. Doing it only at write time is
+  // what let a mixed-case name slip past the "already taken" check.
+  @Transform(({ value }) => (typeof value === 'string' ? value.trim().toLowerCase() : value))
   @IsString()
   @MinLength(3, { message: 'Username must be at least 3 characters' })
   @MaxLength(20, { message: 'Username must be at most 20 characters' })
-  @Matches(/^[a-zA-Z0-9_]+$/, {
+  @Matches(/^[a-z0-9_]+$/, {
     message: 'Username can only contain letters, numbers, and underscores',
   })
   username: string;
@@ -38,9 +44,17 @@ export class RegisterDto {
   @IsEmail({}, { message: 'Please enter a valid email address' })
   email: string;
 
+  // Length only — see the note on the client schema. Must stay in step with it,
+  // or the form accepts a password the API then rejects.
   @IsString()
-  @MinLength(8, { message: 'Password must be at least 8 characters' })
-  @Matches(/[A-Z]/, { message: 'Password must contain at least one uppercase letter' })
-  @Matches(/[0-9]/, { message: 'Password must contain at least one number' })
+  @MinLength(6, { message: 'Password must be at least 6 characters' })
   password: string;
+
+  /**
+   * Whoever invited them. Optional, and a code that matches nobody is ignored
+   * rather than rejected — a bad invite link should not block a sign-up.
+   */
+  @IsOptional()
+  @IsString()
+  referralCode?: string;
 }

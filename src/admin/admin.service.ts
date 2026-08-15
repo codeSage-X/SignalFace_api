@@ -1,6 +1,12 @@
-import { ConflictException, Injectable } from '@nestjs/common';
+import {
+  ConflictException,
+  ForbiddenException,
+  Injectable,
+  NotFoundException,
+} from '@nestjs/common';
 import { randomBytes } from 'crypto';
 import * as bcrypt from 'bcryptjs';
+import type { AccountStatus, User } from '@signal-face/db';
 import { PrismaService } from '../prisma/prisma.service';
 import { AuthService } from '../auth/auth.service';
 import { InviteAdminDto } from './dto/invite-admin.dto';
@@ -80,22 +86,164 @@ export class AdminService {
     };
   }
 
-  async getUsers() {
-    const users = await this.prisma.user.findMany({
-      include: { _count: { select: { trades: true } } },
-      orderBy: { createdAt: 'desc' },
-    });
+  /**
+   * One page of accounts, newest first, optionally narrowed by a search term.
+   *
+   * Offset paging rather than a cursor: the admin table has explicit Previous and
+   * Next controls and shows a total, which a cursor cannot express.
+   */
+  async getUsers(query: { q?: string; page?: number; limit?: number } = {}) {
+    const limit = Math.min(Math.max(query.limit ?? 20, 1), 100);
+    const page = Math.max(query.page ?? 1, 1);
+    const term = query.q?.trim();
 
-    return users.map((user) => ({
+    const where = term
+      ? {
+          OR: [
+            { displayName: { contains: term, mode: 'insensitive' as const } },
+            { username: { contains: term, mode: 'insensitive' as const } },
+            { email: { contains: term, mode: 'insensitive' as const } },
+          ],
+        }
+      : {};
+
+    const [total, users] = await Promise.all([
+      this.prisma.user.count({ where }),
+      this.prisma.user.findMany({
+        where,
+        include: { _count: { select: { trades: true } } },
+        orderBy: { createdAt: 'desc' },
+        skip: (page - 1) * limit,
+        take: limit,
+      }),
+    ]);
+
+    return {
+      items: users.map((user) => this.serializeAdminUser(user)),
+      total,
+      page,
+      limit,
+      pageCount: Math.max(Math.ceil(total / limit), 1),
+    };
+  }
+
+  private serializeAdminUser(
+    user: User & { _count: { trades: number } },
+  ) {
+    return {
       id: user.id,
       name: user.displayName,
+      username: user.username,
       email: user.email,
-      status: user.creatorStatus === 'SUSPENDED' ? 'suspended' : user.emailVerified ? 'active' : 'unverified',
+      avatarUrl: user.avatarUrl,
+      // Moderation wins over verification: a blocked account is blocked whether
+      // or not it ever confirmed its email.
+      status:
+        user.accountStatus === 'BLOCKED'
+          ? 'blocked'
+          : user.accountStatus === 'RESTRICTED'
+            ? 'restricted'
+            : user.emailVerified
+              ? 'active'
+              : 'unverified',
+      accountStatus: user.accountStatus,
+      statusReason: user.statusReason,
+      role: user.role,
       joinDate: user.createdAt,
       tier: this.deriveTier(user.role, user.creatorStatus, user._count.trades),
       trades: user._count.trades,
       balance: user.pointsBalance.toString(),
-    }));
+    };
+  }
+
+  /** Rename an account, or change the address it signs in with. */
+  async updateUser(
+    id: string,
+    dto: { displayName?: string; username?: string; email?: string },
+  ) {
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('No such user');
+
+    const username = dto.username?.trim().toLowerCase();
+    const email = dto.email?.trim();
+
+    // Checked before writing so the admin gets a clear message rather than a
+    // unique-constraint error.
+    if (username && username !== user.username) {
+      const taken = await this.prisma.user.findUnique({ where: { username } });
+      if (taken) throw new ConflictException('That username is already taken');
+    }
+    if (email && email !== user.email) {
+      const taken = await this.prisma.user.findUnique({ where: { email } });
+      if (taken) throw new ConflictException('An account with this email already exists');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: {
+        ...(dto.displayName?.trim() ? { displayName: dto.displayName.trim() } : {}),
+        ...(username ? { username } : {}),
+        ...(email ? { email } : {}),
+      },
+      include: { _count: { select: { trades: true } } },
+    });
+
+    return this.serializeAdminUser(updated);
+  }
+
+  /**
+   * Restrict (under review), block (banned) or reinstate an account.
+   *
+   * Blocking also drops every refresh token, so an already–signed-in session
+   * cannot outlive the ban: without that they would keep working until their
+   * access token expired.
+   */
+  async setUserStatus(
+    id: string,
+    dto: { status: AccountStatus; reason?: string },
+    actingAdminId: string,
+  ) {
+    if (id === actingAdminId) {
+      throw new ForbiddenException('You cannot change your own account status');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('No such user');
+    if (user.role === 'ADMIN' && dto.status !== 'ACTIVE') {
+      throw new ForbiddenException('Admin accounts cannot be restricted or blocked');
+    }
+
+    const updated = await this.prisma.user.update({
+      where: { id },
+      data: {
+        accountStatus: dto.status,
+        statusReason: dto.status === 'ACTIVE' ? null : (dto.reason?.trim() || null),
+        statusAt: dto.status === 'ACTIVE' ? null : new Date(),
+      },
+      include: { _count: { select: { trades: true } } },
+    });
+
+    if (dto.status === 'BLOCKED') {
+      await this.prisma.authToken.deleteMany({ where: { userId: id, type: 'REFRESH' } });
+    }
+
+    return this.serializeAdminUser(updated);
+  }
+
+  /** Permanent. Related rows cascade from the schema's onDelete rules. */
+  async deleteUser(id: string, actingAdminId: string) {
+    if (id === actingAdminId) {
+      throw new ForbiddenException('You cannot delete your own account');
+    }
+
+    const user = await this.prisma.user.findUnique({ where: { id } });
+    if (!user) throw new NotFoundException('No such user');
+    if (user.role === 'ADMIN') {
+      throw new ForbiddenException('Admin accounts cannot be deleted here');
+    }
+
+    await this.prisma.user.delete({ where: { id } });
+    return { id, deleted: true };
   }
 
   async getSignals() {
@@ -174,22 +322,37 @@ export class AdminService {
 
   private async getRecentActivity() {
     const [recentUsers, recentSignals, recentTrades] = [
+      // avatarUrl and username travel with every actor: without them the admin
+      // has nothing to render but a generated placeholder, which is what it was
+      // falling back to.
       await this.prisma.user.findMany({
         orderBy: { createdAt: 'desc' },
         take: 5,
-        select: { displayName: true, createdAt: true, creatorStatus: true },
+        select: {
+          displayName: true,
+          username: true,
+          avatarUrl: true,
+          createdAt: true,
+          creatorStatus: true,
+        },
       }),
       await this.prisma.signal.findMany({
         orderBy: { createdAt: 'desc' },
         take: 5,
-        select: { title: true, createdAt: true, creator: { select: { displayName: true } } },
+        select: {
+          title: true,
+          createdAt: true,
+          creator: { select: { displayName: true, username: true, avatarUrl: true } },
+        },
       }),
       await this.prisma.trade.findMany({
         orderBy: { createdAt: 'desc' },
         take: 5,
         include: {
-          user: { select: { displayName: true } },
-          signal: { select: { title: true, creator: { select: { displayName: true } } } },
+          user: { select: { displayName: true, username: true, avatarUrl: true } },
+          signal: {
+            select: { title: true, creator: { select: { displayName: true } } },
+          },
         },
       }),
     ];
@@ -197,18 +360,24 @@ export class AdminService {
     const items = [
       ...recentUsers.map((u) => ({
         actor: u.displayName,
+        actorUsername: u.username,
+        actorAvatarUrl: u.avatarUrl,
         action: 'New account signup',
         detail: u.creatorStatus === 'APPROVED' ? 'Creator' : 'Fan',
         timestamp: u.createdAt,
       })),
       ...recentSignals.map((s) => ({
         actor: s.creator.displayName,
+        actorUsername: s.creator.username,
+        actorAvatarUrl: s.creator.avatarUrl,
         action: 'Created signal',
         detail: s.title ?? s.creator.displayName,
         timestamp: s.createdAt,
       })),
       ...recentTrades.map((t) => ({
         actor: t.user.displayName,
+        actorUsername: t.user.username,
+        actorAvatarUrl: t.user.avatarUrl,
         action: 'Trade executed',
         detail: `${t.side} ${t.signal.title ?? t.signal.creator.displayName} — $${t.totalPoints.toString()}`,
         timestamp: t.createdAt,

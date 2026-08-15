@@ -20,6 +20,7 @@ import { JwtAuthGuard } from '../auth/guards/jwt-auth.guard';
 import { OptionalJwtAuthGuard } from '../auth/guards/optional-jwt-auth.guard';
 import { UsersService } from './users.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
+import { UpdateInterestsDto } from './dto/update-interests.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { FollowQueryDto } from './dto/follow-query.dto';
 
@@ -72,6 +73,12 @@ export class UsersController {
     return this.usersService.uploadAvatar(req.user.sub, file);
   }
 
+  @Patch('me/interests')
+  @UseGuards(JwtAuthGuard)
+  updateInterests(@Req() req: any, @Body() dto: UpdateInterestsDto) {
+    return this.usersService.updateInterests(req.user.sub, dto.interests);
+  }
+
   @Get('me/following')
   @UseGuards(JwtAuthGuard)
   listFollowing(@Req() req: any, @Query() query: FollowQueryDto) {
@@ -82,6 +89,27 @@ export class UsersController {
   @UseGuards(JwtAuthGuard)
   listFollowers(@Req() req: any, @Query() query: FollowQueryDto) {
     return this.usersService.listFollowers(req.user.sub, query);
+  }
+
+  // Unauthenticated: it backs the sign-up form, where there is no session yet.
+  // Above ':username' so "username-available" isn't read as a handle.
+  @Get('username-available')
+  usernameAvailable(@Query('username') username = '') {
+    return this.usersService.usernameAvailable(username);
+  }
+
+  // Above ':username', alongside 'search', for the same reason.
+  @Get('suggestions')
+  @UseGuards(OptionalJwtAuthGuard)
+  suggestions(@Req() req: any, @Query('limit') limit?: string) {
+    return this.usersService.suggestions(req.user?.sub, limit ? Number(limit) : undefined);
+  }
+
+  // Above ':username', or "search" would be looked up as an account.
+  @Get('search')
+  @UseGuards(OptionalJwtAuthGuard)
+  search(@Req() req: any, @Query() query: FollowQueryDto) {
+    return this.usersService.search(query.q ?? '', req.user?.sub, query);
   }
 
   // Declared after the 'me/*' routes so "me" is never read as a username.

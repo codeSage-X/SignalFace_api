@@ -9,7 +9,7 @@ import { CloudinaryService } from '../cloudinary/cloudinary.service';
 import { UpdateProfileDto } from './dto/update-profile.dto';
 import { UpdateAccountDto } from './dto/update-account.dto';
 import { FollowQueryDto } from './dto/follow-query.dto';
-import type { User, Signal } from '@signal-face/db';
+import type { User, Signal, RealmCategory } from '@signal-face/db';
 
 type UserWithRelations = User & {
   signal: Signal | null;
@@ -201,6 +201,195 @@ export class UsersService {
     };
   }
 
+  /**
+   * Whether a handle can still be claimed, for the live check on the sign-up
+   * form. Normalised the same way registration normalises it, so the answer
+   * here matches what registration will actually do.
+   *
+   * Advisory only — two people can both be told "available" and race for it, so
+   * registration still relies on the unique index to settle the winner.
+   */
+  async usernameAvailable(raw: string) {
+    const username = raw.trim().toLowerCase();
+
+    if (username.length < 3 || username.length > 20 || !/^[a-z0-9_]+$/.test(username)) {
+      return { username, available: false, reason: 'invalid' as const };
+    }
+
+    const taken = await this.prisma.user.findUnique({
+      where: { username },
+      select: { id: true },
+    });
+
+    return { username, available: !taken, reason: taken ? ('taken' as const) : null };
+  }
+
+  /**
+   * "People you may know" — accounts the viewer doesn't already follow, ranked by
+   * how many of the people they *do* follow also follow that account. Mutuals are
+   * the strongest cheap signal; popularity alone would show the same handful of
+   * big accounts to everybody.
+   *
+   * Falls back to most-followed when the viewer follows nobody yet, since there
+   * are no mutuals to reason from — and a signed-out viewer gets the same.
+   */
+  async suggestions(viewerId: string | undefined, limit = 10) {
+    const take = Math.min(Math.max(limit, 1), 30);
+
+    const following = viewerId
+      ? await this.prisma.follow.findMany({
+          where: { followerId: viewerId },
+          select: { followingId: true },
+        })
+      : [];
+
+    const followingIds = following.map((f) => f.followingId);
+    // Never suggest the viewer, nor anyone they already follow.
+    const exclude = [...followingIds, ...(viewerId ? [viewerId] : [])];
+
+    let candidateIds: string[] = [];
+
+    if (followingIds.length) {
+      // Who the people you follow follow, most-shared first.
+      const mutuals = await this.prisma.follow.groupBy({
+        by: ['followingId'],
+        where: {
+          followerId: { in: followingIds },
+          followingId: { notIn: exclude },
+        },
+        _count: { followingId: true },
+        orderBy: { _count: { followingId: 'desc' } },
+        take,
+      });
+      candidateIds = mutuals.map((m) => m.followingId);
+    }
+
+    // Top up from most-followed so the rail is never half empty.
+    if (candidateIds.length < take) {
+      const fillers = await this.prisma.user.findMany({
+        where: {
+          emailVerified: true,
+          id: { notIn: [...exclude, ...candidateIds] },
+        },
+        orderBy: [{ followers: { _count: 'desc' } }, { id: 'asc' }],
+        take: take - candidateIds.length,
+        select: { id: true },
+      });
+      candidateIds = [...candidateIds, ...fillers.map((f) => f.id)];
+    }
+
+    if (!candidateIds.length) return { items: [] };
+
+    const users = await this.prisma.user.findMany({
+      where: { id: { in: candidateIds } },
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        avatarUrl: true,
+        creatorStatus: true,
+        _count: { select: { followers: true } },
+      },
+    });
+
+    // `findMany` doesn't honour the order of an `in` list, so restore the ranking.
+    const byId = new Map(users.map((u) => [u.id, u]));
+
+    return {
+      items: candidateIds
+        .map((id) => byId.get(id))
+        .filter((u): u is (typeof users)[number] => Boolean(u))
+        .map((person) => ({
+          id: person.id,
+          username: person.username,
+          displayName: person.displayName,
+          avatarUrl: person.avatarUrl,
+          creatorStatus: person.creatorStatus,
+          followersCount: person._count.followers,
+          // Excluded above, so this is always false — kept so these rows are the
+          // same shape the follow lists and search results use.
+          isFollowedByMe: false,
+        })),
+    };
+  }
+
+  /**
+   * Accounts matching a free-text query, by handle or display name. Returns the
+   * same person shape as the follow lists so the UI can reuse those rows.
+   *
+   * Ordered by follower count so the obvious account wins: searching "nike"
+   * should not put an account with three followers above the real one.
+   */
+  async search(term: string, viewerId: string | undefined, query: FollowQueryDto) {
+    const q = term.trim();
+    if (!q) return { items: [], nextCursor: null };
+
+    const take = query.limit ?? 20;
+    const contains = { contains: q, mode: 'insensitive' as const };
+
+    const people = await this.prisma.user.findMany({
+      where: {
+        OR: [{ username: contains }, { displayName: contains }],
+        // Someone who never verified is not a real account yet.
+        emailVerified: true,
+      },
+      take: take + 1,
+      ...(query.cursor ? { cursor: { id: query.cursor }, skip: 1 } : {}),
+      orderBy: [{ followers: { _count: 'desc' } }, { id: 'asc' }],
+      select: {
+        id: true,
+        username: true,
+        displayName: true,
+        avatarUrl: true,
+        creatorStatus: true,
+        _count: { select: { followers: true } },
+      },
+    });
+
+    const hasMore = people.length > take;
+    const page = hasMore ? people.slice(0, take) : people;
+
+    // One lookup for the whole page rather than a query per row.
+    let followed = new Set<string>();
+    if (viewerId && page.length) {
+      const edges = await this.prisma.follow.findMany({
+        where: { followerId: viewerId, followingId: { in: page.map((p) => p.id) } },
+        select: { followingId: true },
+      });
+      followed = new Set(edges.map((e) => e.followingId));
+    }
+
+    return {
+      items: page.map((person) => ({
+        id: person.id,
+        username: person.username,
+        displayName: person.displayName,
+        avatarUrl: person.avatarUrl,
+        creatorStatus: person.creatorStatus,
+        followersCount: person._count.followers,
+        isFollowedByMe: followed.has(person.id),
+      })),
+      nextCursor: hasMore ? page[page.length - 1].id : null,
+    };
+  }
+
+  /**
+   * Replaces the viewer's chosen topics. Sent whole rather than patched, since
+   * the picker is a multi-select where deselecting everything is meaningful.
+   */
+  async updateInterests(userId: string, interests: RealmCategory[]) {
+    // De-duplicated so a client sending the same topic twice can't skew ranking.
+    const unique = [...new Set(interests)];
+
+    const user = await this.prisma.user.update({
+      where: { id: userId },
+      data: { interests: unique },
+      select: { interests: true },
+    });
+
+    return { interests: user.interests };
+  }
+
   async updateProfile(userId: string, dto: UpdateProfileDto) {
     await this.prisma.user.update({
       where: { id: userId },
@@ -269,6 +458,9 @@ export class UsersService {
       websiteUrl: user.websiteUrl,
       role: user.role,
       creatorStatus: user.creatorStatus,
+      interests: user.interests,
+      accountStatus: user.accountStatus,
+      statusReason: user.statusReason,
       pointsBalance: user.pointsBalance.toString(),
       emailVerified: user.emailVerified,
       createdAt: user.createdAt,

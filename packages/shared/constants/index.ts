@@ -20,7 +20,9 @@ export const PRICE_SMOOTHING_ALPHA = 0.7;
 
 export const PULSE_INTERVAL_MS = 15 * 60 * 1000;
 
-export const ACCESS_TOKEN_TTL = '15m';
+// Short-lived by design: the client silently trades a refresh token for a new
+// one via `POST /auth/refresh`, so this expiring is invisible to the user.
+export const ACCESS_TOKEN_TTL = '1h';
 export const REFRESH_TOKEN_TTL_DAYS = 30;
 
 export const EMAIL_VERIFY_TOKEN_TTL_HOURS = 24;

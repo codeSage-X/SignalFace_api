@@ -10,6 +10,7 @@ import { SignalsModule } from './signals/signals.module';
 import { MarketModule } from './market/market.module';
 import { WalletModule } from './wallet/wallet.module';
 import { AdminModule } from './admin/admin.module';
+import { RewardsModule } from './rewards/rewards.module';
 
 @Module({
   imports: [
@@ -23,6 +24,7 @@ import { AdminModule } from './admin/admin.module';
     MarketModule,
     WalletModule,
     AdminModule,
+    RewardsModule,
   ],
   controllers: [AppController],
 })
